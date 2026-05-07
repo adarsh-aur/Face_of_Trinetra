@@ -12,7 +12,7 @@ export function Login() {
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [errors, setErrors] = useState({ email: '', password: '' });
-  const [shake, setShake] = useState(false);
+  const [shake] = useState(false);
   const { login, isAuthenticated } = useAuth();
   const navigate = useNavigate();
 
