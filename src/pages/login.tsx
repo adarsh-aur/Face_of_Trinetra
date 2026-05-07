@@ -4,7 +4,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/auth-context';
 import { toast } from 'sonner';
 import { AuthBackground } from '../components/auth/auth-background';
-import { mockUsers } from '../lib/mock-data/users';
+// import { mockUsers } from '../lib/mock-data/users';
 
 export function Login() {
   const [email, setEmail] = useState('');
@@ -53,18 +53,20 @@ export function Login() {
 
     setIsLoading(true);
     
-    const userExists = mockUsers.find(u => u.email === email);
+    // const userExists = mockUsers.find(u => u.email === email);
     
-    if (!userExists) {
-      toast.error('Invalid email or password');
-      setShake(true);
-      setTimeout(() => setShake(false), 300);
-      setPassword('');
-      setIsLoading(false);
-      return;
-    }
+    // if (!userExists) {
+    //   toast.error('Invalid email or password');
+    //   setShake(true);
+    //   setTimeout(() => setShake(false), 300);
+    //   setPassword('');
+    //   setIsLoading(false);
+    //   return;
+    // }
 
-    const success = await login(email);
+    // const success = await login(email);
+    const success = await login(email, password);
+
     if (success) {
       toast.success('Welcome back!');
       navigate('/home');

@@ -4,7 +4,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/auth-context';
 import { toast } from 'sonner';
 import { AuthBackground } from '../components/auth/auth-background';
-import { mockUsers } from '../lib/mock-data/users';
+// import { mockUsers } from '../lib/mock-data/users';
 
 export function Signup() {
   const [name, setName] = useState('');
@@ -43,15 +43,17 @@ export function Signup() {
     e.preventDefault();
     if (!isFormValid) return;
 
-    const emailExists = mockUsers.some(u => u.email === email);
-    if (emailExists) {
-      toast.error('An account with this email already exists');
-      return;
-    }
+    // const emailExists = mockUsers.some(u => u.email === email);
+    // if (emailExists) {
+    //   toast.error('An account with this email already exists');
+    //   return;
+    // }
 
-    setIsLoading(true);
+    // setIsLoading(true);
     
-    const success = await signup(name, email);
+    // const success = await signup(name, email);
+    const success = await signup(name, email, password);
+
     if (success) {
       toast.success('Verification code sent to your email');
       navigate('/verify-otp?type=signup');

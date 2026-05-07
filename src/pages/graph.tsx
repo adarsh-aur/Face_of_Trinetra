@@ -15,6 +15,44 @@ import { GraphCanvasLoader } from '../components/graph/graph-canvas-loader';
 // Lazy load Cytoscape canvas
 const GraphCanvas = lazy(() => import('../components/graph/graph-canvas'));
 
+const neo4jTypeMap: Record<string, string> = {
+  User: 'user', VM: 'vm', IP: 'ip',
+  CVE: 'cve', Role: 'role', Container: 'container',
+};
+
+const deriveProvider = (nodeId: string): 'aws' | 'azure' | 'gcp' => {
+  if (nodeId.includes('_az') || nodeId.includes('az_')) return 'azure';
+  if (nodeId.includes('gcp')) return 'gcp';
+  return 'aws';
+};
+
+const adaptNode = (n: any, index: number) => ({
+  id: n.node_id,
+  type: neo4jTypeMap[n.node_type] ?? 'user',
+  label: n.node_id.replace(/_/g, ' '),
+  score: n.threat_score ?? 0,
+  severity: n.severity ?? 'Low',
+  provider: deriveProvider(n.node_id),
+  highRisk: (n.threat_score ?? 0) >= 0.43,
+  summary: n.summary ?? '',
+  riskScore: n.risk_score ?? 0,
+  exploitProb: n.exploit_prob ?? 0,
+  x: (index % 8) * 120,
+  y: Math.floor(index / 8) * 120,
+  shap: { log: 0.18, cve: n.risk_score ? 0.22 : 0.05, risk: 0.12, exploit: 0.08, identity: 0.10 },
+  mitre: [],
+  attackPath: [],
+});
+
+const adaptEdge = (e: any, i: number) => ({
+  id: `backend-edge-${i}`,
+  type: (e.relation ?? 'connects_to').toLowerCase(),
+  source: e.source,
+  target: e.target,
+  label: e.relation ?? '',
+  weight: 1,
+});
+
 export function AttackGraph() {
   // State
   const [filters, setFilters] = useState<GraphFilterState>({
@@ -33,6 +71,9 @@ export function AttackGraph() {
   const [isMobileFiltersOpen, setIsMobileFiltersOpen] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
   const [isSubgraphMode, setIsSubgraphMode] = useState(false);
+  const [backendNodes, setBackendNodes] = useState<any[] | null>(null);
+  const [backendEdges, setBackendEdges] = useState<any[] | null>(null);
+  const [dataSource, setDataSource] = useState<'neo4j-live' | 'seeded-fallback' | 'mock'>('mock');
 
   // Handle window resize for mobile state
   useEffect(() => {
@@ -47,45 +88,113 @@ export function AttackGraph() {
     setIsSubgraphMode(false);
   }, [selectedNodeId]);
 
+  useEffect(() => {
+    const BASE = import.meta.env.VITE_API_URL ?? 'http://localhost:5000';
+    const token = localStorage.getItem('trinetra_token');
+    if (!token) return;
+
+    fetch(`${BASE}/api/graph`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.json())
+      .then(data => {
+        if (Array.isArray(data.nodes) && data.nodes.length > 0) {
+          setBackendNodes(data.nodes.map(adaptNode));
+          setBackendEdges((data.edges ?? []).map(adaptEdge));
+          setDataSource(data.source ?? 'seeded-fallback');
+        }
+      })
+      .catch(() => { /* keep mock data */ });
+  }, []);
+
   // Derived Data (Filtering)
+  // const { filteredNodes, filteredEdges } = useMemo(() => {
+  //   // 1. Temporal filtering
+  //   // Snapshots are cumulative. If t=8 is selected, we need nodes/edges from t0, t4, t8.
+  //   const snapshotKeys = ['t0', 't4', 't8', 't14', 't19'];
+  //   const selectedIndex = snapshotKeys.indexOf(filters.temporalSnapshot);
+  //   const activeKeys = snapshotKeys.slice(0, selectedIndex + 1);
+
+  //   let activeNodeIds = new Set<string>();
+  //   let activeEdgeIds = new Set<string>();
+
+  //   activeKeys.forEach(k => {
+  //     const snap = graphSnapshots[k as keyof typeof graphSnapshots];
+  //     snap.nodes.forEach(id => activeNodeIds.add(id));
+  //     snap.edges.forEach(id => activeEdgeIds.add(id));
+  //   });
+
+  //   // 2. Apply other filters
+  //   const nodes = mockGraphNodes.filter(n => {
+  //     if (!activeNodeIds.has(n.id)) return false;
+  //     if (!filters.nodeTypes.includes(n.type)) return false;
+  //     if (!filters.providers.includes(n.provider)) return false;
+  //     if (n.score < filters.scoreRange[0] || n.score > filters.scoreRange[1]) return false;
+  //     // Search is handled visually in GraphCanvas (dimming), not by removing nodes
+  //     return true;
+  //   });
+
+  //   const validNodeIds = new Set(nodes.map(n => n.id));
+
+  //   const edges = mockGraphEdges.filter(e => {
+  //     if (!activeEdgeIds.has(e.id)) return false;
+  //     if (!filters.edgeTypes.includes(e.type)) return false;
+  //     // Edge must connect two visible nodes
+  //     if (!validNodeIds.has(e.source) || !validNodeIds.has(e.target)) return false;
+  //     return true;
+  //   });
+
+  //   return { filteredNodes: nodes, filteredEdges: edges };
+  // }, [filters]);
+
   const { filteredNodes, filteredEdges } = useMemo(() => {
-    // 1. Temporal filtering
-    // Snapshots are cumulative. If t=8 is selected, we need nodes/edges from t0, t4, t8.
+    // ── Backend data path (Neo4j live or seeded) ──────────────────────────
+    if (backendNodes && backendEdges) {
+      const nodes = backendNodes.filter((n: any) => {
+        if (!filters.nodeTypes.includes(n.type)) return false;
+        if (!filters.providers.includes(n.provider)) return false;
+        if (n.score < filters.scoreRange[0] || n.score > filters.scoreRange[1]) return false;
+        if (filters.search && !n.label.toLowerCase().includes(filters.search.toLowerCase())) return false;
+        return true;
+      });
+      const validIds = new Set(nodes.map((n: any) => n.id));
+      const edges = backendEdges.filter((e: any) =>
+        filters.edgeTypes.includes(e.type) &&
+        validIds.has(e.source) &&
+        validIds.has(e.target)
+      );
+      return { filteredNodes: nodes, filteredEdges: edges };
+    }
+
+    // ── Original mock data path (unchanged) ───────────────────────────────
     const snapshotKeys = ['t0', 't4', 't8', 't14', 't19'];
     const selectedIndex = snapshotKeys.indexOf(filters.temporalSnapshot);
     const activeKeys = snapshotKeys.slice(0, selectedIndex + 1);
-    
+
     let activeNodeIds = new Set<string>();
     let activeEdgeIds = new Set<string>();
-    
     activeKeys.forEach(k => {
       const snap = graphSnapshots[k as keyof typeof graphSnapshots];
-      snap.nodes.forEach(id => activeNodeIds.add(id));
-      snap.edges.forEach(id => activeEdgeIds.add(id));
+      snap.nodes.forEach((id: string) => activeNodeIds.add(id));
+      snap.edges.forEach((id: string) => activeEdgeIds.add(id));
     });
 
-    // 2. Apply other filters
-    const nodes = mockGraphNodes.filter(n => {
+    const nodes = mockGraphNodes.filter((n: any) => {
       if (!activeNodeIds.has(n.id)) return false;
       if (!filters.nodeTypes.includes(n.type)) return false;
       if (!filters.providers.includes(n.provider)) return false;
       if (n.score < filters.scoreRange[0] || n.score > filters.scoreRange[1]) return false;
-      // Search is handled visually in GraphCanvas (dimming), not by removing nodes
       return true;
     });
 
-    const validNodeIds = new Set(nodes.map(n => n.id));
-
-    const edges = mockGraphEdges.filter(e => {
+    const validNodeIds = new Set(nodes.map((n: any) => n.id));
+    const edges = mockGraphEdges.filter((e: any) => {
       if (!activeEdgeIds.has(e.id)) return false;
       if (!filters.edgeTypes.includes(e.type)) return false;
-      // Edge must connect two visible nodes
       if (!validNodeIds.has(e.source) || !validNodeIds.has(e.target)) return false;
       return true;
     });
 
     return { filteredNodes: nodes, filteredEdges: edges };
-  }, [filters]);
+  }, [filters, backendNodes, backendEdges]);
 
   // Selected item data
   const selectedNode = selectedNodeId ? mockGraphNodes.find(n => n.id === selectedNodeId) : null;
@@ -95,7 +204,7 @@ export function AttackGraph() {
   const connectedNodes = useMemo(() => {
     if (!selectedNodeId) return [];
     const connected: { id: string; label: string; type: string; edgeType: string }[] = [];
-    
+
     mockGraphEdges.forEach(e => {
       if (e.source === selectedNodeId) {
         const target = mockGraphNodes.find(n => n.id === e.target);
@@ -110,7 +219,7 @@ export function AttackGraph() {
 
   return (
     <div className="flex flex-col h-[calc(100vh-6rem)] relative overflow-hidden">
-      
+
       {/* Header Bar */}
       <div className="flex justify-between items-center pb-4 border-b border-slate-200 dark:border-white/10 shrink-0">
         <div className="flex items-center gap-3">
@@ -133,9 +242,17 @@ export function AttackGraph() {
             <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-100 dark:bg-white/5 border border-slate-200 dark:border-white/10 text-xs text-slate-600 dark:text-slate-300">
               <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse" /> {filteredNodes.filter(n => n.highRisk).length} Flagged
             </div>
+            {/* Data source badge */}
+            <div className={`hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-xs font-medium ${dataSource === 'neo4j-live'
+                ? 'bg-green-500/10 border-green-500/30 text-green-600 dark:text-green-400'
+                : 'bg-slate-100 dark:bg-white/5 border-slate-200 dark:border-white/10 text-slate-500'
+              }`}>
+              <div className={`w-2 h-2 rounded-full ${dataSource === 'neo4j-live' ? 'bg-green-500 animate-pulse' : 'bg-slate-400'}`} />
+              {dataSource === 'neo4j-live' ? 'Neo4j Live' : 'Demo Data'}
+            </div>
           </div>
 
-          <button 
+          <button
             onClick={() => setIsMobileFiltersOpen(true)}
             className="md:hidden h-8 px-3 flex items-center text-xs font-medium rounded-md border border-slate-200 dark:border-white/10 hover:bg-slate-50 dark:hover:bg-white/5"
           >
@@ -152,7 +269,7 @@ export function AttackGraph() {
 
       {/* Main Content Area */}
       <div className="flex-1 flex min-h-0 relative">
-        
+
         {/* Left Filter Panel (Desktop) */}
         <div className="hidden md:block shrink-0 h-full">
           <FilterPanel filters={filters} setFilters={setFilters} isMobile={false} />
@@ -171,9 +288,9 @@ export function AttackGraph() {
         {/* Center Canvas */}
         <div className="flex-1 relative min-w-0 h-full bg-[radial-gradient(ellipse_at_center,_var(--tw-gradient-stops))] from-slate-50 via-slate-100 to-slate-200 dark:from-[#1a1a24] dark:via-[#12121a] dark:to-[#0a0a0f]">
           <Suspense fallback={<GraphCanvasLoader />}>
-            <GraphCanvas 
-              nodes={filteredNodes} 
-              edges={filteredEdges} 
+            <GraphCanvas
+              nodes={filteredNodes}
+              edges={filteredEdges}
               filters={filters}
               onNodeSelect={setSelectedNodeId}
               onEdgeSelect={setSelectedEdgeId}
@@ -185,22 +302,22 @@ export function AttackGraph() {
 
           {/* Right Detail Panel Overlay */}
           {selectedNode && (
-            <NodeDetailPanel 
-              node={selectedNode} 
-              onClose={() => setSelectedNodeId(null)} 
+            <NodeDetailPanel
+              node={selectedNode}
+              onClose={() => setSelectedNodeId(null)}
               onNodeClick={setSelectedNodeId}
               connectedNodes={connectedNodes}
               isSubgraphMode={isSubgraphMode}
               onToggleSubgraph={() => setIsSubgraphMode(!isSubgraphMode)}
             />
           )}
-          
+
           {selectedEdge && (
-            <EdgeDetailPanel 
-              edge={selectedEdge} 
+            <EdgeDetailPanel
+              edge={selectedEdge}
               sourceNode={mockGraphNodes.find(n => n.id === selectedEdge.source)}
               targetNode={mockGraphNodes.find(n => n.id === selectedEdge.target)}
-              onClose={() => setSelectedEdgeId(null)} 
+              onClose={() => setSelectedEdgeId(null)}
               onNodeClick={setSelectedNodeId}
             />
           )}
